@@ -1,19 +1,20 @@
 // Iris - Decentralized cloud messaging
 // Copyright (c) 2013 Project Iris. All rights reserved.
 //
-// Iris is dual licensed: you can redistribute it and/or modify it under the
-// terms of the GNU General Public License as published by the Free Software
-// Foundation, either version 3 of the License, or (at your option) any later
-// version.
+// Community license: for open source projects and services, Iris is free to use,
+// redistribute and/or modify under the terms of the GNU Affero General Public
+// License as published by the Free Software Foundation, either version 3, or (at
+// your option) any later version.
 //
-// The framework is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-// more details.
+// Evaluation license: you are free to privately evaluate Iris without adhering
+// to either of the community or commercial licenses for as long as you like,
+// however you are not permitted to publicly release any software or service
+// built on top of it without a valid license.
 //
-// Alternatively, the Iris framework may be used in accordance with the terms
-// and conditions contained in a signed written agreement between you and the
-// author(s).
+// Commercial license: for commercial and/or closed source projects and services,
+// the Iris cloud messaging system may be used in accordance with the terms and
+// conditions contained in an individually negotiated signed written agreement
+// between you and the author(s).
 
 package iris
 
@@ -59,7 +60,7 @@ type ConnectionHandler interface {
 	// Handles the request, returning the reply that should be forwarded back to
 	// the caller. If the method crashes, nothing is returned and the caller will
 	// eventually time out.
-	HandleRequest(req []byte, timeout time.Duration) []byte
+	HandleRequest(req []byte, timeout time.Duration) ([]byte, error)
 
 	// Handles the request to open a direct tunnel.
 	HandleTunnel(tun *Tunnel)
@@ -80,8 +81,9 @@ type Connection struct {
 	iris    *Overlay          // Interface into the distributed carrier
 
 	reqIdx  uint64                 // Index to assign the next request
-	reqPend map[uint64]chan []byte // Active requests waiting for a reply
-	reqLock sync.RWMutex           // Mutex to protect the request map
+	reqReps map[uint64]chan []byte // Reply channels for active requests
+	reqErrs map[uint64]chan error  // Error channels for active requests
+	reqLock sync.RWMutex           // Mutex to protect the result channel maps
 
 	subLive map[string]SubscriptionHandler // Active subscriptions
 	subLock sync.RWMutex                   // Mutex to protect the subscription map
@@ -99,15 +101,22 @@ type Connection struct {
 	term chan struct{}   // Channel to signal termination to blocked go-routines
 }
 
-// Connects to the iris overlay.
+// Connects to the iris overlay. The parameters can be either both specified, in
+// the case of a service registration, or both skipped in the case of a client
+// connection. Others combinations will fail.
 func (o *Overlay) Connect(cluster string, handler ConnectionHandler) (*Connection, error) {
+	// Make sure only valid argument combinations pass
+	if (cluster == "" && handler != nil) || (cluster != "" && handler == nil) {
+		return nil, fmt.Errorf("invalid connection arguments: cluster '%v', handler %v", cluster, handler)
+	}
 	// Create the connection object
 	c := &Connection{
 		cluster: cluster,
 		handler: handler,
 		iris:    o,
 
-		reqPend: make(map[uint64]chan []byte),
+		reqReps: make(map[uint64]chan []byte),
+		reqErrs: make(map[uint64]chan error),
 		subLive: make(map[string]SubscriptionHandler),
 		tunLive: make(map[uint64]*Tunnel),
 
@@ -124,10 +133,12 @@ func (o *Overlay) Connect(cluster string, handler ConnectionHandler) (*Connectio
 	o.conns[c.id] = c
 	o.lock.Unlock()
 
-	// Subscribe to the multi-group
-	for _, prefix := range clusterPrefixes {
-		if err := c.iris.subscribe(c.id, prefix+cluster); err != nil {
-			return nil, err
+	// Subscribe to the multi-group if the connection is a service
+	if c.cluster != "" {
+		for _, prefix := range clusterPrefixes {
+			if err := c.iris.subscribe(c.id, prefix+cluster); err != nil {
+				return nil, err
+			}
 		}
 	}
 	c.workers.Start()
@@ -145,21 +156,25 @@ func (c *Connection) Broadcast(cluster string, msg []byte) error {
 // Executes a synchronous request to cluster (load balanced between all active),
 // and returns the received reply, or an error if a timeout is reached.
 func (c *Connection) Request(cluster string, req []byte, timeout time.Duration) ([]byte, error) {
-	// Create a reply channel for the results
+	// Create a reply and error channel for the results
+	repc := make(chan []byte, 1)
+	errc := make(chan error, 1)
+
 	c.reqLock.Lock()
-	reqCh := make(chan []byte, 1)
 	reqId := c.reqIdx
 	c.reqIdx++
-	c.reqPend[reqId] = reqCh
+	c.reqReps[reqId] = repc
+	c.reqErrs[reqId] = errc
 	c.reqLock.Unlock()
 
-	// Make sure reply channel is cleaned up
+	// Make sure the result channels are cleaned up
 	defer func() {
 		c.reqLock.Lock()
-		defer c.reqLock.Unlock()
-
-		delete(c.reqPend, reqId)
-		close(reqCh)
+		delete(c.reqReps, reqId)
+		delete(c.reqErrs, reqId)
+		close(repc)
+		close(errc)
+		c.reqLock.Unlock()
 	}()
 	// Send the request
 	prefixIdx := int(reqId) % config.IrisClusterSplits
@@ -171,8 +186,10 @@ func (c *Connection) Request(cluster string, req []byte, timeout time.Duration) 
 		return nil, ErrTerminating
 	case <-time.After(timeout):
 		return nil, ErrTimeout
-	case rep := <-reqCh:
-		return rep, nil
+	case reply := <-repc:
+		return reply, nil
+	case err := <-errc:
+		return nil, err
 	}
 }
 
@@ -255,17 +272,36 @@ func (c *Connection) Tunnel(cluster string, timeout time.Duration) (*Tunnel, err
 	}
 }
 
+// Closes the service aspect of the connection, but leave the client alive.
+func (c *Connection) Unregister() error {
+	if c.cluster != "" {
+		// Remove the cluster subscriptions
+		for _, prefix := range clusterPrefixes {
+			c.iris.unsubscribe(c.id, prefix+c.cluster)
+		}
+		// Make sure the service is marked unregistered
+		c.cluster = ""
+	}
+	return nil
+}
+
 // Gracefully terminates the connection, all subscriptions and all tunnels.
 func (c *Connection) Close() error {
 	// Signal the connection as terminating
 	close(c.term)
 
 	// Close all open tunnels
-	/*c.tunLock.Lock()
+	c.tunLock.Lock()
+	closing := new(sync.WaitGroup)
 	for _, tun := range c.tunLive {
-		go tun.Close()
+		closing.Add(1)
+		go func() {
+			defer closing.Done()
+			tun.Close()
+		}()
 	}
-	c.tunLock.Unlock()*/
+	c.tunLock.Unlock()
+	closing.Wait()
 
 	// Remove all topic subscriptions
 	c.subLock.Lock()
@@ -274,11 +310,17 @@ func (c *Connection) Close() error {
 	}
 	c.subLock.Unlock()
 
-	// Leave the cluster and close the carrier connection
-	for _, prefix := range clusterPrefixes {
-		c.iris.unsubscribe(c.id, prefix+c.cluster)
+	// Leave the cluster if it was a service connection
+	if err := c.Unregister(); err != nil {
+		return err
 	}
 	// Terminate the worker pool
 	c.workers.Terminate(true)
+
+	// Drop the connection from the tracked list
+	c.iris.lock.Lock()
+	delete(c.iris.conns, c.id)
+	c.iris.lock.Unlock()
+
 	return nil
 }

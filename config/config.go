@@ -1,19 +1,20 @@
 // Iris - Decentralized cloud messaging
 // Copyright (c) 2013 Project Iris. All rights reserved.
 //
-// Iris is dual licensed: you can redistribute it and/or modify it under the
-// terms of the GNU General Public License as published by the Free Software
-// Foundation, either version 3 of the License, or (at your option) any later
-// version.
+// Community license: for open source projects and services, Iris is free to use,
+// redistribute and/or modify under the terms of the GNU Affero General Public
+// License as published by the Free Software Foundation, either version 3, or (at
+// your option) any later version.
 //
-// The framework is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-// more details.
+// Evaluation license: you are free to privately evaluate Iris without adhering
+// to either of the community or commercial licenses for as long as you like,
+// however you are not permitted to publicly release any software or service
+// built on top of it without a valid license.
 //
-// Alternatively, the Iris framework may be used in accordance with the terms
-// and conditions contained in a signed written agreement between you and the
-// author(s).
+// Commercial license: for commercial and/or closed source projects and services,
+// the Iris cloud messaging system may be used in accordance with the terms and
+// conditions contained in an individually negotiated signed written agreement
+// between you and the author(s).
 
 // Package config contains the hard-coded configuration values of the system.
 package config
@@ -161,7 +162,7 @@ var PacketCipher = aes.NewCipher
 var PacketCipherBits = 128
 
 // Bootstrapping ports to use.
-var BootPorts = []int{14142, 27182, 31415, 45654, 22222, 33333}
+var BootPorts = []int{14142, 27182, 31415}
 
 // Number of heartbeats to queue before blocking.
 var BootBeatsBuffer = 32
@@ -174,6 +175,24 @@ var BootSlowProbe = 1000
 
 // Scanning interval during bootstrapping (ms).
 var BootScan = 100
+
+// Number of seeded IP addresses to buffer before sleeping.
+var BootSeedSinkBuffer = 32
+
+// CoreOS etcd server-to-server ports.
+var BootCoreOSPorts = []int{2380, 7001}
+
+// Interval for retrieving peer lists during booting.
+var BootCoreOSFastRescan = time.Second
+
+// Interval for retrieving peer lists after convergence.
+var BootCoreOSSlowRescan = time.Minute
+
+// Time increment to sleep after consecutive failures.
+var BootCoreOSSleepIncrement = time.Second
+
+// Maximum sleep time for retrying after a failure.
+var BootCoreOSSleepLimit = time.Minute
 
 // Virtual address space (bits).
 var PastrySpace = 40
@@ -248,16 +267,19 @@ var IrisTunnelBuffer = 256
 var AppParentId = []byte(nil)
 
 // Protocol version to ensure compatible connections.
-var ProtocolVersion = "v0.1-pre"
+var ProtocolVersion = "v0.4"
 
 // Maximum number of handlers allowed concurrently per relay connection.
 var RelayHandlerThreads = 8
 
-// Number of messages to buffer per outbound tunnel.
-var RelayTunnelBuffer = 128
+// Maximum permitted size for a message chunk.
+var RelayTunnelChunkLimit = 65536
+
+// Size of the input buffer to use on inbound messages.
+var RelayTunnelBuffer = 4 * 1024 * 1024
 
 // Time alloted to a client to acknowledge a tunnel.
-var RelayTunnelTimeout = 3000
+var RelayTunnelTimeout = 3 * time.Second
 
-// Block time when trying a tunnel read (ms).
-var RelayTunnelPoll = 1000
+// Block time when trying a tunnel read.
+var RelayTunnelPoll = time.Second

@@ -1,19 +1,20 @@
 // Iris - Decentralized cloud messaging
 // Copyright (c) 2013 Project Iris. All rights reserved.
 //
-// Iris is dual licensed: you can redistribute it and/or modify it under the
-// terms of the GNU General Public License as published by the Free Software
-// Foundation, either version 3 of the License, or (at your option) any later
-// version.
+// Community license: for open source projects and services, Iris is free to use,
+// redistribute and/or modify under the terms of the GNU Affero General Public
+// License as published by the Free Software Foundation, either version 3, or (at
+// your option) any later version.
 //
-// The framework is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-// more details.
+// Evaluation license: you are free to privately evaluate Iris without adhering
+// to either of the community or commercial licenses for as long as you like,
+// however you are not permitted to publicly release any software or service
+// built on top of it without a valid license.
 //
-// Alternatively, the Iris framework may be used in accordance with the terms
-// and conditions contained in a signed written agreement between you and the
-// author(s).
+// Commercial license: for commercial and/or closed source projects and services,
+// the Iris cloud messaging system may be used in accordance with the terms and
+// conditions contained in an individually negotiated signed written agreement
+// between you and the author(s).
 
 package main
 
@@ -44,6 +45,7 @@ var clusterName = flag.String("net", "", "name of the cluster to join or create"
 var rsaKeyPath = flag.String("rsa", "", "path to the RSA private key to use for data security")
 
 var cpuProfile = flag.String("cpuprof", "", "path to CPU profiling results")
+var heapProfile = flag.String("heapprof", "", "path to memory heap profiling results")
 var blockProfile = flag.String("blockprof", "", "path to lock contention profiling results")
 
 // Prints the usage of the Iris command and its options.
@@ -152,6 +154,14 @@ func main() {
 		pprof.StartCPUProfile(prof)
 		defer pprof.StopCPUProfile()
 	}
+	// Check for memory profiling
+	if *heapProfile != "" {
+		prof, err := os.Create(*heapProfile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer pprof.Lookup("heap").WriteTo(prof, 0)
+	}
 	// Check for lock contention profiling
 	if *blockProfile != "" {
 		prof, err := os.Create(*blockProfile)
@@ -161,6 +171,8 @@ func main() {
 		runtime.SetBlockProfileRate(1)
 		defer pprof.Lookup("block").WriteTo(prof, 0)
 	}
+	// Set the concurrency level
+	runtime.GOMAXPROCS(4 * runtime.NumCPU())
 
 	// Create and boot a new carrier
 	log.Printf("main: booting iris overlay...")

@@ -1,19 +1,20 @@
 // Iris - Decentralized cloud messaging
 // Copyright (c) 2013 Project Iris. All rights reserved.
 //
-// Iris is dual licensed: you can redistribute it and/or modify it under the
-// terms of the GNU General Public License as published by the Free Software
-// Foundation, either version 3 of the License, or (at your option) any later
-// version.
+// Community license: for open source projects and services, Iris is free to use,
+// redistribute and/or modify under the terms of the GNU Affero General Public
+// License as published by the Free Software Foundation, either version 3, or (at
+// your option) any later version.
 //
-// The framework is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-// more details.
+// Evaluation license: you are free to privately evaluate Iris without adhering
+// to either of the community or commercial licenses for as long as you like,
+// however you are not permitted to publicly release any software or service
+// built on top of it without a valid license.
 //
-// Alternatively, the Iris framework may be used in accordance with the terms
-// and conditions contained in a signed written agreement between you and the
-// author(s).
+// Commercial license: for commercial and/or closed source projects and services,
+// the Iris cloud messaging system may be used in accordance with the terms and
+// conditions contained in an individually negotiated signed written agreement
+// between you and the author(s).
 
 // Package relay implements the message relay between the Iris node and locally
 // attached applications.
@@ -21,6 +22,7 @@ package relay
 
 import (
 	"bufio"
+	"fmt"
 	"net"
 	"sync"
 
@@ -29,17 +31,18 @@ import (
 	"github.com/project-iris/iris/proto/iris"
 )
 
-// Message relay between the local carrier and an attached client app.
+// Message relay between the local carrier and an attached binding.
 type relay struct {
 	// Application layer fields
 	iris *iris.Connection // Interface into the iris overlay
 
 	reqIdx  uint64                 // Index to assign the next request
-	reqPend map[uint64]chan []byte // Active requests waiting for a reply
-	reqLock sync.RWMutex           // Mutex to protect the request map
+	reqReps map[uint64]chan []byte // Reply channels for active requests
+	reqErrs map[uint64]chan error  // Error channels for active requests
+	reqLock sync.RWMutex           // Mutex to protect the result channel maps
 
 	tunIdx  uint64                   // Temporary index to assign the next inbound tunnel
-	tunPend map[uint64]*iris.Tunnel  // Tunnels pending app confirmation
+	tunPend map[uint64]*iris.Tunnel  // Tunnels pending binding confirmation
 	tunInit map[uint64]chan struct{} // Confirmation channels for the pending tunnels
 	tunLive map[uint64]*tunnel       // Active tunnels
 	tunLock sync.RWMutex             // Mutex to protect the tunnel maps
@@ -47,14 +50,15 @@ type relay struct {
 	// Network layer fields
 	sock     net.Conn          // Network connection to the attached client
 	sockBuf  *bufio.ReadWriter // Buffered access to the network socket
-	sockLock sync.Mutex        // Mutex to atomise message sending
+	sockLock sync.Mutex        // Mutex to atomize message sending
+	sockWait int32             // Counter for the pending writes (batch before flush)
 
 	// Quality of service fields
 	workers *pool.ThreadPool // Concurrent threads handling the connection
 
 	// Bookkeeping fields
 	done chan *relay     // Channel on which to signal termination
-	quit chan chan error // Quit channe to synchronize relay termination
+	quit chan chan error // Quit channel to synchronize relay termination
 	term chan struct{}   // Channel to signal termination to blocked go-routines
 }
 
@@ -62,7 +66,8 @@ type relay struct {
 func (r *Relay) acceptRelay(sock net.Conn) (*relay, error) {
 	// Create the relay object
 	rel := &relay{
-		reqPend: make(map[uint64]chan []byte),
+		reqReps: make(map[uint64]chan []byte),
+		reqErrs: make(map[uint64]chan error),
 		tunPend: make(map[uint64]*iris.Tunnel),
 		tunInit: make(map[uint64]chan struct{}),
 		tunLive: make(map[uint64]*tunnel),
@@ -84,13 +89,28 @@ func (r *Relay) acceptRelay(sock net.Conn) (*relay, error) {
 	defer rel.sockLock.Unlock()
 
 	// Initialize the relay
-	app, err := rel.procInit()
+	version, cluster, err := rel.procInit()
 	if err != nil {
 		rel.drop()
 		return nil, err
 	}
-	// Connect to the Iris network
-	conn, err := r.iris.Connect(app, rel)
+	// Make sure the protocol version is compatible
+	if version != protoVersion {
+		// Drop the connection in either error branch
+		defer rel.drop()
+
+		reason := fmt.Sprintf("Unsupported protocol. Client: %s. Iris: %s.", version, protoVersion)
+		if err := rel.sendDeny(reason); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("relay: unsupported client protocol version: have %v, want %v", version, protoVersion)
+	}
+	// Connect to the Iris network either as a service or as a client
+	var handler iris.ConnectionHandler
+	if cluster != "" {
+		handler = rel
+	}
+	conn, err := r.iris.Connect(cluster, handler)
 	if err != nil {
 		rel.drop()
 		return nil, err

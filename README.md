@@ -9,10 +9,40 @@ You can find further infos on the [Iris website](http://iris.karalabe.com) and d
 
 There is a growing community on Twitter [@iriscmf](https://twitter.com/iriscmf), Google groups [project-iris](https://groups.google.com/group/project-iris) and GitHub [project-iris](https://github.com/project-iris).
 
+  Compatibility
+-----------------
+
+Since from time to time the relay protocol changes (communication between Iris and client libraries), the below compatibility matrix was introduced to make it easier to find which versions of the client libraries (columns) match with which versions of the Iris node (rows).
+
+| | [iris-erl](https://github.com/project-iris/iris-erl) | [iris-go](https://github.com/project-iris/iris-go) | [iris-java](https://github.com/project-iris/iris-java) | [iris-scala](https://github.com/project-iris/iris-scala) |
+|:-:|:-:|:-:|:-:|:-:|
+| **v0.3.x** | [v1](https://github.com/project-iris/iris-erl/tree/v1) | [v1](https://github.com/project-iris/iris-go/tree/v1) | [v1](https://github.com/project-iris/iris-java/tree/v1) | [v1](https://github.com/project-iris/iris-scala/tree/v1) |
+| **v0.2.x** | [v0](https://github.com/project-iris/iris-erl/tree/v0) | [v0](https://github.com/project-iris/iris-go/tree/v0) | - | - |
+| **v0.1.x** | [v0](https://github.com/project-iris/iris-erl/tree/v0) | [v0](https://github.com/project-iris/iris-go/tree/v0) | - | - |
+
   Releases
 ------------
 
  * Development:
+    - Fix Google Compute Engine netmask issue (i.e. retrieve real network configs).
+    - Seamlessly use local CoreOS/etcd service as bootstrap seed server.
+ * Version 0.3.2: **October 4, 2014**
+    - Use 4x available CPU cores by default (will need a flag for this later).
+ * Version 0.3.1: **September 22, 2014**
+    - Open local relay endpoint on both IPv4 and IPv6 (bindings can remain oblivious).
+    - Fix bootstrap crash in case of single-host networks (host space < 2 bits).
+    - Fix race condition between tunnel construction request and finalization.
+ * Version 0.3.0: **August 11, 2014**
+    - Work around upstream Go bug [#5395](http://code.google.com/p/go/issues/detail?id=5395) on Windows.
+    - Fix memory leak caused by unreleased connection references.
+    - Fix tunnel lingering caused by missing close invocation in Iris overlay.
+    - Fix message loss caused by clearing scheduled messages during a relay close.
+    - Fix race condition between tunnel construction and operation.
+    - Rewrite relay protocol to v1.0-draft2.
+       - Proper protocol negotiation (magic string, version numbers).
+       - Built in error fields to remote requests, no need for user wrappers.
+       - Tunnel data chunking to support arbitrarily large messages.
+       - Size based tunnel throttling opposed to the message count previously.
     - Migrate from github.com/karalabe to github.com/project-iris.
  * Version 0.2.0: **March 31, 2014**
     - Redesigned tunnels based on direct TCP connections.

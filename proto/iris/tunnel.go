@@ -1,19 +1,20 @@
 // Iris - Decentralized cloud messaging
 // Copyright (c) 2013 Project Iris. All rights reserved.
 //
-// Iris is dual licensed: you can redistribute it and/or modify it under the
-// terms of the GNU General Public License as published by the Free Software
-// Foundation, either version 3 of the License, or (at your option) any later
-// version.
+// Community license: for open source projects and services, Iris is free to use,
+// redistribute and/or modify under the terms of the GNU Affero General Public
+// License as published by the Free Software Foundation, either version 3, or (at
+// your option) any later version.
 //
-// The framework is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-// more details.
+// Evaluation license: you are free to privately evaluate Iris without adhering
+// to either of the community or commercial licenses for as long as you like,
+// however you are not permitted to publicly release any software or service
+// built on top of it without a valid license.
 //
-// Alternatively, the Iris framework may be used in accordance with the terms
-// and conditions contained in a signed written agreement between you and the
-// author(s).
+// Commercial license: for commercial and/or closed source projects and services,
+// the Iris cloud messaging system may be used in accordance with the terms and
+// conditions contained in an individually negotiated signed written agreement
+// between you and the author(s).
 
 package iris
 
@@ -27,6 +28,7 @@ import (
 	"log"
 	"net"
 	"sort"
+	"sync"
 	"time"
 
 	"code.google.com/p/go.crypto/hkdf"
@@ -47,17 +49,23 @@ type authPacket struct {
 	Id uint64
 }
 
+// Header to attach to data transfer packets.
+type dataHeader struct {
+	SizeOrCont int // Size of the original message, or 0 if not the first chunk
+}
+
 // Make sure the handshake packets are registered with gob.
 func init() {
 	gob.Register(&initPacket{})
 	gob.Register(&authPacket{})
+	gob.Register(&dataHeader{})
 }
 
-func (o *Overlay) tunneler(ipnet *net.IPNet, live chan struct{}, quit chan chan error) {
+func (o *Overlay) tunneler(ip net.IP, live chan struct{}, quit chan chan error) {
 	// Listen for incoming streams on the given interface and random port.
-	addr, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(ipnet.IP.String(), "0"))
+	addr, err := net.ResolveTCPAddr("tcp", net.JoinHostPort(ip.String(), "0"))
 	if err != nil {
-		panic(fmt.Sprintf("failed to resolve interface (%v): %v.", ipnet.IP, err))
+		panic(fmt.Sprintf("failed to resolve interface (%v): %v.", ip, err))
 	}
 	sock, err := stream.Listen(addr)
 	if err != nil {
@@ -113,8 +121,11 @@ type Tunnel struct {
 	conn   *link.Link // Encrypted data link of the tunnel
 	secret []byte     // Master key from which to derive the link keys
 
-	init chan *link.Link // Channel to receive the reverse tunnel link
-	term chan struct{}   // Channel to signal termination to blocked go-routines
+	initDone chan *link.Link // Channel to receive the reverse tunnel link
+	initStop chan struct{}   // Channel to signal initialization abortion
+
+	term chan struct{} // Channel to signal termination to blocked go-routines
+	lock sync.Mutex    // Lock protecting the termination flag (init/close race)
 }
 
 // Initiates an outgoing tunnel to a remote cluster, by configuring a local
@@ -127,7 +138,9 @@ func (c *Connection) initiateTunnel(cluster string, timeout time.Duration) (*Tun
 		id:    tunId,
 		owner: c,
 
-		init: make(chan *link.Link, 1),
+		initDone: make(chan *link.Link),
+		initStop: make(chan struct{}),
+
 		term: make(chan struct{}),
 	}
 	c.tunIdx++
@@ -147,13 +160,26 @@ func (c *Connection) initiateTunnel(cluster string, timeout time.Duration) (*Tun
 	var err error
 	select {
 	case <-c.term:
+		close(tun.initStop)
 		err = ErrTerminating
 	case <-time.After(timeout):
+		close(tun.initStop)
 		err = ErrTimeout
-	case tun.conn = <-tun.init:
-		// Clean up init fields
-		tun.secret, tun.init = nil, nil
-		return tun, nil
+	case conn := <-tun.initDone:
+		// Make sure we haven't terminated in the mean while (init/close race)
+		tun.lock.Lock()
+		defer tun.lock.Unlock()
+
+		select {
+		case <-tun.term:
+			err = ErrTerminating
+			conn.Close()
+			return nil, ErrTerminating
+		default:
+			// Finalize tunnel initiation and return
+			tun.conn, tun.secret, tun.initDone, tun.initStop = conn, nil, nil, nil
+			return tun, nil
+		}
 	}
 	// Tunneling failed, clean up and report error
 	c.tunLock.Lock()
@@ -191,11 +217,23 @@ func (c *Connection) buildTunnel(remote uint64, id uint64, key []byte, addrs []s
 	}
 	// If no error occurred, initialize the client endpoint
 	if err == nil {
-		tun.conn, err = c.initClientTunnel(strm, remote, id, key, deadline)
+		var conn *link.Link
+		conn, err = c.initClientTunnel(strm, remote, id, key, deadline)
 		if err != nil {
 			if err := strm.Close(); err != nil {
 				log.Printf("iris: failed to close uninitialized client tunnel stream: %v.", err)
 			}
+		} else {
+			// Make sure the tunnel wasn't terminated since (init/close race)
+			tun.lock.Lock()
+			select {
+			case <-tun.term:
+				conn.Close()
+				err = ErrTerminating
+			default:
+				tun.conn = conn
+			}
+			tun.lock.Unlock()
 		}
 	}
 	// Tunneling failed, clean up and report error
@@ -253,8 +291,15 @@ func (o *Overlay) initServerTunnel(strm *stream.Stream) error {
 	conn.Start(config.IrisTunnelBuffer)
 
 	// Send back the initialized link to the pending tunnel
-	tun.init <- conn
-	return nil
+	select {
+	case tun.initDone <- conn:
+		// Connection handled by initiator
+		return nil
+	case <-tun.initStop:
+		// Initiator timed out or terminated, close
+		conn.Close()
+		return nil // No error, since tunnel was handled, albeit not as expected
+	}
 }
 
 // Initializes a stream into an encrypted tunnel link.
@@ -295,14 +340,30 @@ func (c *Connection) initClientTunnel(strm *stream.Stream, remote uint64, id uin
 
 // Closes the tunnel connection.
 func (t *Tunnel) Close() error {
-	// Terminate the encrypted link
-	return t.conn.Close()
+	if t.owner.handleTunnelClose(t.id) {
+		// Synchronize between close and finishing init
+		t.lock.Lock()
+		defer t.lock.Unlock()
+		close(t.term)
+
+		// Handle race between close and init
+		if t.conn != nil {
+			return t.conn.Close()
+		}
+		return nil
+	}
+	return errors.New("tunnel already closed")
 }
 
 // Sends an asynchronous message to the remote pair. Not reentrant (order).
-func (t *Tunnel) Send(msg []byte) error {
+func (t *Tunnel) Send(size int, chunk []byte) error {
 	// Create and encrypt the message
-	packet := &proto.Message{Data: msg}
+	packet := &proto.Message{
+		Head: proto.Header{
+			Meta: &dataHeader{size},
+		},
+		Data: chunk,
+	}
 	if err := packet.Encrypt(); err != nil {
 		return err
 	}
@@ -317,22 +378,22 @@ func (t *Tunnel) Send(msg []byte) error {
 
 // Retrieves a message waiting in the local queue. If none is available, the
 // call blocks until either one arrives or a timeout is reached.
-func (t *Tunnel) Recv(timeout time.Duration) ([]byte, error) {
+func (t *Tunnel) Recv(timeout time.Duration) (int, []byte, error) {
 	// Retrieve an encrypted packet from the tunnel link
 	select {
 	case packet, ok := <-t.conn.Recv:
 		// Terminate the tunnel if closed remotely
 		if !ok {
-			close(t.term)
-			return nil, ErrTerminating
+			t.Close()
+			return 0, nil, ErrTerminating
 		}
 		// Decrypt and pass upstream
 		if err := packet.Decrypt(); err != nil {
-			return nil, err
+			return 0, nil, err
 		}
-		return packet.Data, nil
+		return packet.Head.Meta.(*dataHeader).SizeOrCont, packet.Data, nil
 
 	case <-time.After(timeout):
-		return nil, ErrTimeout
+		return 0, nil, ErrTimeout
 	}
 }

@@ -1,19 +1,20 @@
 // Iris - Decentralized cloud messaging
 // Copyright (c) 2013 Project Iris. All rights reserved.
 //
-// Iris is dual licensed: you can redistribute it and/or modify it under the
-// terms of the GNU General Public License as published by the Free Software
-// Foundation, either version 3 of the License, or (at your option) any later
-// version.
+// Community license: for open source projects and services, Iris is free to use,
+// redistribute and/or modify under the terms of the GNU Affero General Public
+// License as published by the Free Software Foundation, either version 3, or (at
+// your option) any later version.
 //
-// The framework is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-// more details.
+// Evaluation license: you are free to privately evaluate Iris without adhering
+// to either of the community or commercial licenses for as long as you like,
+// however you are not permitted to publicly release any software or service
+// built on top of it without a valid license.
 //
-// Alternatively, the Iris framework may be used in accordance with the terms
-// and conditions contained in a signed written agreement between you and the
-// author(s).
+// Commercial license: for commercial and/or closed source projects and services,
+// the Iris cloud messaging system may be used in accordance with the terms and
+// conditions contained in an individually negotiated signed written agreement
+// between you and the author(s).
 
 package iris
 
@@ -39,17 +40,17 @@ func (r *tunneler) HandleBroadcast(msg []byte) {
 	panic("Broadcast passed to tunnel handler")
 }
 
-func (r *tunneler) HandleRequest(req []byte, timeout time.Duration) []byte {
+func (r *tunneler) HandleRequest(req []byte, timeout time.Duration) ([]byte, error) {
 	panic("Request passed to tunnel handler")
 }
 
 func (r *tunneler) HandleTunnel(tun *Tunnel) {
 	for {
-		if msg, err := tun.Recv(3 * time.Second); err == nil {
+		if chunk, msg, err := tun.Recv(3 * time.Second); err == nil {
 			if r.self != int(msg[0]) {
 				atomic.AddUint32(&r.remote, 1)
 			}
-			if err := tun.Send(msg); err != nil {
+			if err := tun.Send(chunk, msg); err != nil {
 				panic(err)
 			}
 		} else {
@@ -80,7 +81,7 @@ func TestTunnelMultiNodeMultiConn(t *testing.T) {
 	testTunnel(t, 5, 5, 5, 100) // ulimit exceeded if too large
 }
 
-// Tests multi node multi connection request/replies.
+// Tests multi node multi connection tunnel.
 func testTunnel(t *testing.T, nodes, conns, tuns, msgs int) {
 	// Configure the test
 	swapConfigs()
@@ -159,13 +160,15 @@ func testTunnel(t *testing.T, nodes, conns, tuns, msgs int) {
 						msg := make([]byte, len(orig))
 						copy(msg, orig)
 
-						if err := tun.Send(msg); err != nil {
+						if err := tun.Send(len(msg), msg); err != nil {
 							t.Fatalf("failed to send message: %v.", err)
 						}
-						if msg, err := tun.Recv(3 * time.Second); err != nil {
+						if chunk, msg, err := tun.Recv(3 * time.Second); err != nil {
 							t.Fatalf("failed to receive message: %v.", err)
+						} else if chunk != len(orig) {
+							t.Fatalf("send/recv chunk mismatch: have %v, want %v.", chunk, len(orig))
 						} else if bytes.Compare(orig, msg) != 0 {
-							t.Fatalf("send/recv mismatch: have %v, want %v.", msg, orig)
+							t.Fatalf("send/recv data mismatch: have %v, want %v.", msg, orig)
 						}
 					}
 				}(i, j, k)

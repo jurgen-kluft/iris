@@ -1,19 +1,20 @@
 // Iris - Decentralized cloud messaging
 // Copyright (c) 2013 Project Iris. All rights reserved.
 //
-// Iris is dual licensed: you can redistribute it and/or modify it under the
-// terms of the GNU General Public License as published by the Free Software
-// Foundation, either version 3 of the License, or (at your option) any later
-// version.
+// Community license: for open source projects and services, Iris is free to use,
+// redistribute and/or modify under the terms of the GNU Affero General Public
+// License as published by the Free Software Foundation, either version 3, or (at
+// your option) any later version.
 //
-// The framework is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-// more details.
+// Evaluation license: you are free to privately evaluate Iris without adhering
+// to either of the community or commercial licenses for as long as you like,
+// however you are not permitted to publicly release any software or service
+// built on top of it without a valid license.
 //
-// Alternatively, the Iris framework may be used in accordance with the terms
-// and conditions contained in a signed written agreement between you and the
-// author(s).
+// Commercial license: for commercial and/or closed source projects and services,
+// the Iris cloud messaging system may be used in accordance with the terms and
+// conditions contained in an individually negotiated signed written agreement
+// between you and the author(s).
 
 // Contains the wire protocol for the Iris layer communication.
 
@@ -45,6 +46,7 @@ type header struct {
 
 	// Optional fields for requests and replies
 	ReqId   uint64        // Request/response identifier
+	ReqFail bool          // Flag whether a request failed
 	ReqTime time.Duration // Maximum amount of time spendable on the request
 
 	// Optional fields for tunnels
@@ -83,8 +85,12 @@ func (c *Connection) assembleRequest(reqId uint64, req []byte, timeout time.Dura
 
 // Assembles the reply message to an application request. It consists of the
 // reply opcode, the original request's id and the payload itself.
-func (c *Connection) assembleReply(dest uint64, reqId uint64, rep []byte) *proto.Message {
-	return c.assemblePacket(&header{Op: opRep, Dest: dest, ReqId: reqId}, rep)
+func (c *Connection) assembleReply(dest uint64, reqId uint64, rep []byte, err error) *proto.Message {
+	if err == nil {
+		return c.assemblePacket(&header{Op: opRep, Dest: dest, ReqId: reqId}, rep)
+	} else {
+		return c.assemblePacket(&header{Op: opRep, Dest: dest, ReqId: reqId, ReqFail: true}, []byte(err.Error()))
+	}
 }
 
 // Assembles an event message to be published in a topic. It consists of the

@@ -1,19 +1,20 @@
 // Iris - Decentralized cloud messaging
 // Copyright (c) 2013 Project Iris. All rights reserved.
 //
-// Iris is dual licensed: you can redistribute it and/or modify it under the
-// terms of the GNU General Public License as published by the Free Software
-// Foundation, either version 3 of the License, or (at your option) any later
-// version.
+// Community license: for open source projects and services, Iris is free to use,
+// redistribute and/or modify under the terms of the GNU Affero General Public
+// License as published by the Free Software Foundation, either version 3, or (at
+// your option) any later version.
 //
-// The framework is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-// more details.
+// Evaluation license: you are free to privately evaluate Iris without adhering
+// to either of the community or commercial licenses for as long as you like,
+// however you are not permitted to publicly release any software or service
+// built on top of it without a valid license.
 //
-// Alternatively, the Iris framework may be used in accordance with the terms
-// and conditions contained in a signed written agreement between you and the
-// author(s).
+// Commercial license: for commercial and/or closed source projects and services,
+// the Iris cloud messaging system may be used in accordance with the terms and
+// conditions contained in an individually negotiated signed written agreement
+// between you and the author(s).
 
 package relay
 
@@ -32,10 +33,10 @@ var acceptPollRate = time.Second
 // Relay service, listening on a local TCP port and accepting connections for
 // joining the Iris network.
 type Relay struct {
-	address  *net.TCPAddr     // Listener address
-	listener *net.TCPListener // Listener socket for the locally joining apps
-	iris     *iris.Overlay    // Overlay through which connections are relayed
+	endpoint  int                // Local port on which to listen on
+	listeners []*net.TCPListener // Listener sockets for the locally joining apps
 
+	iris    *iris.Overlay       // Overlay through which connections are relayed
 	clients map[*relay]struct{} // Active client connections
 
 	done chan *relay     // Channel on which active clients signal termination
@@ -45,45 +46,65 @@ type Relay struct {
 // Creates a new relay attached to a carrier and opens the listener socket on
 // the specified local port.
 func New(port int, overlay *iris.Overlay) (*Relay, error) {
-	// Assemble the listener address
-	addr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("localhost:%d", port))
-	if err != nil {
-		return nil, err
-	}
-	// Return the relay service endpoint
 	return &Relay{
-		address: addr,
-		iris:    overlay,
-		clients: make(map[*relay]struct{}),
-		done:    make(chan *relay),
-		quit:    make(chan chan error),
+		endpoint:  port,
+		listeners: []*net.TCPListener{},
+		iris:      overlay,
+		clients:   make(map[*relay]struct{}),
+		done:      make(chan *relay),
+		quit:      make(chan chan error),
 	}, nil
 }
 
 // Starts accepting local relay connections.
 func (r *Relay) Boot() error {
-	// Open the server socket
-	if sock, err := net.ListenTCP("tcp", r.address); err != nil {
-		return err
-	} else {
-		r.listener = sock
+	errs := []error{}
+
+	// Open the two (IPv4 and IPv6) listener sockets
+	for _, addr := range []string{"127.0.0.1", "[::1]"} {
+		if sock, err := net.Listen("tcp", fmt.Sprintf("%s:%d", addr, r.endpoint)); err != nil {
+			log.Printf("relay: failed to listen on %s:%d: %v", addr, r.endpoint, err)
+			errs = append(errs, err)
+		} else {
+			r.listeners = append(r.listeners, sock.(*net.TCPListener))
+		}
+	}
+	if len(errs) == 2 {
+		return fmt.Errorf("boot failed: %v (IPv4), %v (IPv6)", errs[0], errs[1])
 	}
 	// Start accepting connections
-	go r.acceptor()
+	for _, sock := range r.listeners {
+		go r.acceptor(sock)
+	}
 	return nil
 }
 
 // Closes all open connections and terminates the relaying service.
 func (r *Relay) Terminate() error {
+	errs := []error{}
 	errc := make(chan error, 1)
-	r.quit <- errc
-	return <-errc
+
+	for i := 0; i < len(r.listeners); i++ {
+		r.quit <- errc
+		if err := <-errc; err != nil {
+			errs = append(errs, err)
+		}
+	}
+	switch len(errs) {
+	case 0:
+		return nil
+	case 1:
+		return errs[0]
+	case 2:
+		return fmt.Errorf("%v", errs)
+	}
+	panic("unreachable code")
 }
 
 // Accepts inbound connections till the service is terminated. For each one it
 // starts a new handler and hands the socket over.
-func (r *Relay) acceptor() {
-	// Accept conenctions until termination request
+func (r *Relay) acceptor(listener *net.TCPListener) {
+	// Accept connections until termination request
 	var errc chan error
 	for errc == nil {
 		select {
@@ -97,8 +118,8 @@ func (r *Relay) acceptor() {
 			}
 		default:
 			// Accept an incoming connection but without blocking for too long
-			r.listener.SetDeadline(time.Now().Add(acceptPollRate))
-			if sock, err := r.listener.Accept(); err == nil {
+			listener.SetDeadline(time.Now().Add(acceptPollRate))
+			if sock, err := listener.Accept(); err == nil {
 				if rel, err := r.acceptRelay(sock); err != nil {
 					log.Printf("relay: accept failed: %v.", err)
 				} else {
@@ -122,5 +143,5 @@ func (r *Relay) acceptor() {
 		rel.report()
 	}
 	// Clean up and report
-	errc <- r.listener.Close()
+	errc <- listener.Close()
 }

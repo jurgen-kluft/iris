@@ -1,25 +1,27 @@
 // Iris - Decentralized cloud messaging
 // Copyright (c) 2013 Project Iris. All rights reserved.
 //
-// Iris is dual licensed: you can redistribute it and/or modify it under the
-// terms of the GNU General Public License as published by the Free Software
-// Foundation, either version 3 of the License, or (at your option) any later
-// version.
+// Community license: for open source projects and services, Iris is free to use,
+// redistribute and/or modify under the terms of the GNU Affero General Public
+// License as published by the Free Software Foundation, either version 3, or (at
+// your option) any later version.
 //
-// The framework is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-// more details.
+// Evaluation license: you are free to privately evaluate Iris without adhering
+// to either of the community or commercial licenses for as long as you like,
+// however you are not permitted to publicly release any software or service
+// built on top of it without a valid license.
 //
-// Alternatively, the Iris framework may be used in accordance with the terms
-// and conditions contained in a signed written agreement between you and the
-// author(s).
+// Commercial license: for commercial and/or closed source projects and services,
+// the Iris cloud messaging system may be used in accordance with the terms and
+// conditions contained in an individually negotiated signed written agreement
+// between you and the author(s).
 
 // Event handlers mostly for the carrier side messages.
 
 package iris
 
 import (
+	"errors"
 	"log"
 	"math/big"
 	"math/rand"
@@ -104,7 +106,7 @@ func (o *Overlay) HandleDirect(src *big.Int, msg *proto.Message) {
 	// Pass the message to the connection to handle
 	switch head.Op {
 	case opRep:
-		conn.workers.Schedule(func() { conn.handleReply(head.ReqId, msg.Data) })
+		conn.workers.Schedule(func() { conn.handleReply(head.ReqId, head.ReqFail, msg.Data) })
 	default:
 		log.Printf("iris: invalid direct opcode: %v.", head.Op)
 	}
@@ -116,23 +118,31 @@ func (c *Connection) handleBroadcast(msg []byte) {
 }
 
 // Passes the request up to the application handler, also specifying the timeout
-// under which the reply must be sent back. Only a non-nil reply is forwarded to
-// the requester.
+// under which the reply must be sent back. Either a reply or a binding side
+// failure is forwarded to the remote node.
 func (c *Connection) handleRequest(srcNode *big.Int, srcConn uint64, reqId uint64, msg []byte, timeout time.Duration) {
-	if rep := c.handler.HandleRequest(msg, timeout); rep != nil {
-		c.iris.scribe.Direct(srcNode, c.assembleReply(srcConn, reqId, rep))
+	rep, err := c.handler.HandleRequest(msg, timeout)
+	if err == ErrTerminating || err == ErrTimeout {
+		return
 	}
+	c.iris.scribe.Direct(srcNode, c.assembleReply(srcConn, reqId, rep, err))
 }
 
 // Looks up the result channel for the pending request and inserts the reply. If
 // the channel doesn't exist any more the reply is silently dropped.
-func (c *Connection) handleReply(reqId uint64, rep []byte) {
+func (c *Connection) handleReply(reqId uint64, failed bool, data []byte) {
 	c.reqLock.RLock()
 	defer c.reqLock.RUnlock()
 
-	// Make sure the request is still alive and don't block if dying
-	if ch, ok := c.reqPend[reqId]; ok {
-		ch <- rep
+	// Interpret the data as either a reply or a failure string
+	if !failed {
+		if repc, ok := c.reqReps[reqId]; ok {
+			repc <- data
+		}
+	} else {
+		if errc, ok := c.reqErrs[reqId]; ok {
+			errc <- errors.New(string(data))
+		}
 	}
 }
 
@@ -153,9 +163,30 @@ func (c *Connection) handlePublish(topic string, msg []byte) {
 // Accepts the inbound tunnel, notifies the remote endpoint of the success and
 // starts the local handler.
 func (c *Connection) handleTunnelRequest(conn uint64, id uint64, key []byte, addrs []string, timeout time.Duration) {
+	// Validate the remote address list
+	if len(addrs) == 0 {
+		log.Printf("iris: empty address list for tunnel request.")
+		return
+	}
+	// Try to establish the outbound tunnel
 	if tun, err := c.buildTunnel(conn, id, key, addrs, timeout); err != nil {
 		log.Printf("iris: failed to accept tunnel: %v.", err)
 	} else {
 		c.handler.HandleTunnel(tun)
 	}
+}
+
+// Removes a closing tunnel from the list and returns whether it existed or not.
+// This flag is required to prevent simultaneous double closes.
+func (c *Connection) handleTunnelClose(id uint64) bool {
+	c.tunLock.Lock()
+	defer c.tunLock.Unlock()
+
+	// Make sure the tunnel has not been removed yet
+	if _, ok := c.tunLive[id]; !ok {
+		return false
+	}
+	// Remove the tunnel from the active list
+	delete(c.tunLive, id)
+	return true
 }

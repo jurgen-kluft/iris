@@ -1,19 +1,20 @@
 // Iris - Decentralized cloud messaging
 // Copyright (c) 2014 Project Iris. All rights reserved.
 //
-// Iris is dual licensed: you can redistribute it and/or modify it under the
-// terms of the GNU General Public License as published by the Free Software
-// Foundation, either version 3 of the License, or (at your option) any later
-// version.
+// Community license: for open source projects and services, Iris is free to use,
+// redistribute and/or modify under the terms of the GNU Affero General Public
+// License as published by the Free Software Foundation, either version 3, or (at
+// your option) any later version.
 //
-// The framework is distributed in the hope that it will be useful, but WITHOUT
-// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
-// FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
-// more details.
+// Evaluation license: you are free to privately evaluate Iris without adhering
+// to either of the community or commercial licenses for as long as you like,
+// however you are not permitted to publicly release any software or service
+// built on top of it without a valid license.
 //
-// Alternatively, the Iris framework may be used in accordance with the terms
-// and conditions contained in a signed written agreement between you and the
-// author(s).
+// Commercial license: for commercial and/or closed source projects and services,
+// the Iris cloud messaging system may be used in accordance with the terms and
+// conditions contained in an individually negotiated signed written agreement
+// between you and the author(s).
 
 // Package iris implements the iris communication primitives on top of scribe.
 package iris
@@ -71,17 +72,27 @@ func (o *Overlay) Boot() (int, error) {
 		return 0, err
 	}
 	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok {
-			if !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
-				// Create a quit channel
-				quit := make(chan chan error)
-				o.tunQuits = append(o.tunQuits, quit)
+		// Workaround for upstream Go issue #5395, extract IP from both IPNet and IPAddr
+		var ip net.IP
+		switch addr.(type) {
+		case *net.IPNet:
+			ip = addr.(*net.IPNet).IP
+		case *net.IPAddr:
+			ip = addr.(*net.IPAddr).IP
+		default:
+			log.Printf("iris: unknown interface address type for: %v.", addr)
+			continue
+		}
+		// Start the tunnel acceptor on non-localhost IPv4 networks
+		if !ip.IsLoopback() && ip.To4() != nil {
+			// Create a quit channel
+			quit := make(chan chan error)
+			o.tunQuits = append(o.tunQuits, quit)
 
-				// Start and sync the acceptor
-				live := make(chan struct{})
-				go o.tunneler(ipnet, live, quit)
-				<-live
-			}
+			// Start and sync the acceptor
+			live := make(chan struct{})
+			go o.tunneler(ip, live, quit)
+			<-live
 		}
 	}
 	return peers, nil
@@ -145,44 +156,46 @@ func (o *Overlay) subscribe(id uint64, topic string) error {
 // Unsubscribes a client from a topic, removing the scribe subscription too if
 // the last client.
 func (o *Overlay) unsubscribe(id uint64, topic string) error {
-	o.lock.Lock()
-	defer o.lock.Unlock()
+	o.lock.Lock() // Unlocked at 4 separate return points!
 
-	// Create a new subscription if non existed (mark as so)
-	cascade := false
-	if lock, ok := o.subLock[topic]; !ok {
+	// Look up the subscription to leave
+	lock, ok := o.subLock[topic]
+	if !ok {
 		// This should *not* happen
 		log.Printf("iris: unsubscribe from non-existent topic: %v.", topic)
-		return ErrNotSubscribed
-	} else {
-		// Remove the subscription
-		lock.Lock()
-		subs := o.subLive[topic]
-		done := false
-		for i, subId := range subs {
-			if id == subId {
-				subs = append(subs[:i], subs[i+1:]...)
-				done = true
-				break
-			}
-		}
-		o.subLive[topic] = subs
-		lock.Unlock()
 
-		// Actually check if anything was removed, just in case
-		if !done {
-			log.Printf("iris: remove non-existent subscription: %v:%v.", topic, id)
-			return ErrNotSubscribed
+		o.lock.Unlock()
+		return ErrNotSubscribed
+	}
+	// Remove the subscription
+	lock.Lock()
+	subs := o.subLive[topic]
+	done := false
+	for i, subId := range subs {
+		if id == subId {
+			subs = append(subs[:i], subs[i+1:]...)
+			done = true
+			break
 		}
-		if len(subs) == 0 {
-			delete(o.subLive, topic)
-			delete(o.subLock, topic)
-			cascade = true
-		}
+	}
+	o.subLive[topic] = subs
+	lock.Unlock()
+
+	// Actually check if anything was removed, just in case
+	if !done {
+		log.Printf("iris: remove non-existent subscription: %v:%v.", topic, id)
+
+		o.lock.Unlock()
+		return ErrNotSubscribed
 	}
 	// Dump the topic if all subscriptions are gone
-	if cascade {
+	if len(subs) == 0 {
+		delete(o.subLive, topic)
+		delete(o.subLock, topic)
+
+		o.lock.Unlock()
 		return o.scribe.Unsubscribe(topic)
 	}
+	o.lock.Unlock()
 	return nil
 }

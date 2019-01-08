@@ -1,5 +1,5 @@
 // Iris - Decentralized cloud messaging
-// Copyright (c) 2013 Project Iris. All rights reserved.
+// Copyright (c) 2014 Project Iris. All rights reserved.
 //
 // Community license: for open source projects and services, Iris is free to use,
 // redistribute and/or modify under the terms of the GNU Affero General Public
@@ -16,46 +16,5 @@
 // conditions contained in an individually negotiated signed written agreement
 // between you and the author(s).
 
-// Package system implements some basic operating system related tasks.
-package system
-
-import (
-	"sync"
-	"time"
-
-	"github.com/project-iris/iris/config"
-)
-
-// Cpu usage infos and statistics (not much needed for now).
-type cpuInfo struct {
-	usage float32
-
-	lock sync.RWMutex
-}
-
-// Singleton CPU status file.
-var cpu cpuInfo
-
-// Returns the CPU usage since the last measurement cycle.
-func CpuUsage() float32 {
-	cpu.lock.RLock()
-	defer cpu.lock.RUnlock()
-	return cpu.usage
-}
-
-// Init function to start the measurements
-func init() {
-	// Make sure state is initialized to something
-	gatherCpuInfo()
-	time.Sleep(100 * time.Millisecond)
-	gatherCpuInfo()
-
-	// Measure till program is terminated
-	go func() {
-		tick := time.Tick(config.ScribeBeatPeriod)
-		for {
-			<-tick
-			gatherCpuInfo()
-		}
-	}()
-}
+// Package test contains helper methods for running the test suite.
+package test
